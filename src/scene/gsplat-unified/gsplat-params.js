@@ -449,6 +449,32 @@ class GSplatParams {
     }
 
     /** @private */
+    _screenSpaceLodBias = 0;
+
+    /**
+     * Screen-space LOD bias (Alos). 0 (default) disables it: LOD and budget priority use pure camera
+     * distance (stock behavior). When > 0, a node's optimal LOD and budget priority are biased by its
+     * on-screen size, so large-but-distant geometry keeps detail. Useful range ~0.5..3.
+     *
+     * @type {number}
+     */
+    set screenSpaceLodBias(value) {
+        if (this._screenSpaceLodBias !== value) {
+            this._screenSpaceLodBias = value;
+            this.dirty = true;
+        }
+    }
+
+    /**
+     * Gets the screen-space LOD bias strength.
+     *
+     * @type {number}
+     */
+    get screenSpaceLodBias() {
+        return this._screenSpaceLodBias;
+    }
+
+    /** @private */
     _splatBudget = 0;
 
     /**

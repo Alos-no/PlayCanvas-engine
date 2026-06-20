@@ -1180,7 +1180,8 @@ class GSplatWorld {
             }
         }
 
-        // Budget balancing across all octrees
+        // Budget balancing across all octrees. Screen-space biasing (Alos) is already baked into each node's
+        // budgetBucket by evaluateNodeLods (via the biased effectiveDistance), so the balancer stays stock.
         this._budgetBalancer.balance(this._octreeInstances, adjustedBudget);
 
         // Apply LOD changes

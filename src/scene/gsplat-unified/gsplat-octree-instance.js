@@ -7,6 +7,7 @@ import { BoundingBox } from '../../core/shape/bounding-box.js';
 import { Color } from '../../core/math/color.js';
 import { GSplatPlacement } from './gsplat-placement.js';
 import { GsplatAllocId } from './gsplat-alloc-id.js';
+import { medianNodeRadius, screenSpaceEffectiveDistance } from './gsplat-screen-space-lod.js';
 import { GSPLAT_DEBUG_NODE_AABBS } from '../constants.js';
 import { NUM_BUCKETS } from './constants.js';
 
@@ -523,7 +524,7 @@ class GSplatOctreeInstance {
      * @private
      */
     evaluateNodeLods(cameraNode, maxLod, lodBaseDistance, lodMultiplier, rangeMin, rangeMax, params, uniformScale, accumulateSplats = true, globalMaxDistanceForBuckets = 0) {
-        const { lodBehindPenalty } = params;
+        const { lodBehindPenalty, screenSpaceLodBias } = params;
 
         // Compute FOV compensation: use min(tanHalfV, tanHalfH) to handle ultra-wide and portrait
         const camera = cameraNode.camera;
@@ -564,6 +565,19 @@ class GSplatOctreeInstance {
         }
 
         const bucketScale = globalMaxDistanceForBuckets > 0 ? NUM_BUCKETS / Math.sqrt(globalMaxDistanceForBuckets) : 0;
+
+        // Alos screen-space LOD: reference ("typical") node radius for size biasing — the median over
+        // all node radii (resists large-far-cell skew), computed once per octree and cached. Only
+        // needed when the bias is active.
+        let ssRefRadius = this.octree._ssRefRadius;
+        if (screenSpaceLodBias > 0 && ssRefRadius === undefined) {
+            const radii = [];
+            for (let i = 0; i < nodes.length; i++) {
+                radii.push(nodes[i].boundingSphere.w);
+            }
+            ssRefRadius = medianNodeRadius(radii);
+            this.octree._ssRefRadius = ssRefRadius;
+        }
 
         for (let nodeIndex = 0; nodeIndex < nodes.length; nodeIndex++) {
             const nodeInfo = nodeInfos[nodeIndex];
@@ -611,12 +625,18 @@ class GSplatOctreeInstance {
 
             // LOD index from geometric distance bands (equivalent to 1 + log(d/d0)/log(m) truncated; coarse-first scan).
             const fovAdjustedDistance = penalizedDistance * fovScale;
+
+            // Alos screen-space LOD: bias the effective distance by on-screen node size so large-but-distant
+            // nodes get a finer LOD. With screenSpaceLodBias <= 0 this returns fovAdjustedDistance unchanged (stock).
+            const nodeRadius = nodes[nodeIndex].boundingSphere.w;
+            const effectiveDistance = screenSpaceEffectiveDistance(fovAdjustedDistance, nodeRadius, ssRefRadius, screenSpaceLodBias);
+
             let optimalLodIndex;
-            if (maxLod === 0 || fovAdjustedDistance < lodBaseDistance) {
+            if (maxLod === 0 || effectiveDistance < lodBaseDistance) {
                 optimalLodIndex = 0;
             } else {
                 optimalLodIndex = maxLod;
-                while (optimalLodIndex > 1 && fovAdjustedDistance < minDistBuf[optimalLodIndex]) {
+                while (optimalLodIndex > 1 && effectiveDistance < minDistBuf[optimalLodIndex]) {
                     optimalLodIndex--;
                 }
             }
@@ -628,9 +648,15 @@ class GSplatOctreeInstance {
             nodeInfo.optimalLod = optimalLodIndex;
             nodeInfo.worldDistance = fovAdjustedDistance * uniformScale;
 
-            // Budget balancer bucket (sqrt mapping; must match GSplatBudgetBalancer). Fused here when enforcing budget.
+            // Budget balancer bucket (sqrt mapping; must match GSplatBudgetBalancer). Fused here when enforcing
+            // budget. Buckets by the screen-space-biased effectiveDistance so the budget priority matches the LOD
+            // selection: a large-on-screen node gets a smaller effective distance -> a LOWER bucket -> it is
+            // degraded LAST under budget pressure (preserved). With screenSpaceLodBias <= 0, effectiveDistance ===
+            // fovAdjustedDistance, so this is byte-identical to stock distance bucketing and reuses the same
+            // globalMaxDistance normalizer (no separate biased global-max pre-pass needed).
             if (bucketScale > 0 && optimalLodIndex >= 0) {
-                const bucket = (Math.sqrt(nodeInfo.worldDistance) * bucketScale) >>> 0;
+                const worldEffectiveDistance = effectiveDistance * uniformScale;
+                const bucket = (Math.sqrt(worldEffectiveDistance) * bucketScale) >>> 0;
                 nodeInfo.budgetBucket = bucket < NUM_BUCKETS ? bucket : NUM_BUCKETS - 1;
             }
 
